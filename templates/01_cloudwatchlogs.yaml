@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create CloudWatch Logs
+
+Parameters:
+  RetentionInDays:
+    Description: RetentionInDays
+    Type: Number
+    Default: 14
+  SizeInMBs:
+    Description: "The size of the buffer, in MBs, that Kinesis Data Firehose uses for incoming data before delivering it to the destination."
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 128
+  IntervalInSeconds:
+    Description: The length of time, in seconds, that Kinesis Data Firehose buffers incoming data before delivering it to the destination. 
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 900
+  CompressionFormat:
+    Description: "The type of compression that Kinesis Data Firehose uses to compress the data that it delivers to the Amazon S3 bucket. "
+    Type: String
+    Default: 'UNCOMPRESSED'
+    AllowedValues: ['GZIP','Snappy','UNCOMPRESSED','ZIP']
+
+Resources:
+  LogsConfig:
+    Type : "AWS::SSM::Parameter"
+    Properties:
+      Name: AmazonCloudWatch-iwasa-al2-cwlogs-param
+      Type: String
+      Value: |
+        {
+          "logs": {
+            "logs_collected": {
+              "files": {
+                "collect_list": [
+                  {
+                    "file_path": "/var/log/httpd/access_log",
+                    "log_group_name": "/var/log/httpd/access_log",
+                    "log_stream_name": "{instance_id}"
+                  },
+                  {
+                    "file_path": "/var/log/httpd/error_log",
+                    "log_group_name": "/var/log/httpd/error_log",
+                    "log_stream_name": "{instance_id}"
+                  },
+                  {
+                    "file_path": "/var/log/secure",
+                    "log_group_name": "/var/log/secure",
+                    "log_stream_name": "{instance_id}"
+                  },
+                  {
+                    "file_path": "/var/log/messages",
+                    "log_group_name": "/var/log/messages",
+                    "log_stream_name": "{instance_id}"
+                  }
+                ]
+              }
+            }
+          }
+        }
+
+
+  LogsConfigWindows:
+    Type : "AWS::SSM::Parameter"
+    Properties:
+      Name: AmazonCloudWatch-iwasa-win-cwlogs-param
+      Type: String
+      Value: |
+        {
+          "logs": {
+            "logs_collected": {
+              "windows_events": {
+                "collect_list": [
+                  {
+                    "event_format": "xml",
+                    "event_levels": [
+                            "VERBOSE",
+                            "INFORMATION",
+                            "WARNING",
+                            "ERROR",
+                            "CRITICAL"
+                    ],
+                    "event_name": "System",
+                    "log_group_name": "Windows/System",
+                    "log_stream_name": "{instance_id}"
+                  },
+                  {
+                    "event_format": "xml",
+                    "event_levels": [
+                            "VERBOSE",
+                            "INFORMATION",
+                            "WARNING",
+                            "ERROR",
+                            "CRITICAL"
+                    ],
+                    "event_name": "Security",
+                    "log_group_name": "Windows/Security",
+                    "log_stream_name": "{instance_id}"
+                  }
+                ]
+              }
+            }
+          }
+        }
+
+  FirehoseIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: iwasa-firehose-role
+      Tags: 
+        - Key: "Name"
+          Value: iwasa-firehose-role
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: firehose.amazonaws.com
+          Action: sts:AssumeRole
+      MaxSessionDuration: 3600
+      ManagedPolicyArns: 
+        - !Ref FirehoseAssumePolicy
+  FirehoseAssumePolicy:
+      Type: "AWS::IAM::ManagedPolicy"
+      Properties:
+          ManagedPolicyName: iwasa-firehose-policy
+          Path: "/"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource: 
+                  - !Sub arn:aws:s3:::iwasa-cwlogs-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::iwasa-cwlogs-${AWS::AccountId}/*
+
+  CWLogsIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: iwasa-cwlogs-role
+      Tags: 
+        - Key: "Name"
+          Value: iwasa-cwlogs-role
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: logs.ap-northeast-1.amazonaws.com
+          Action: sts:AssumeRole
+      MaxSessionDuration: 3600
+      ManagedPolicyArns: 
+        - !Ref CWLogsAssumePolicy
+  CWLogsAssumePolicy:
+      Type: "AWS::IAM::ManagedPolicy"
+      Properties:
+          ManagedPolicyName: iwasa-cwlogs-policy
+          Path: "/"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - firehose:*
+                Resource: 
+                  - !Sub arn:aws:firehose:ap-northeast-1:${AWS::AccountId}:*
+
+  HttpdAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: /var/log/httpd/access_log
+      RetentionInDays: !Ref RetentionInDays
+  HttpdAccessLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'HttpdAccessLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref HttpdAccessLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  HttpdAccessLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-httpdaccess
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/httpd/access_log/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-httpdaccess
+
+  HttpdErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: /var/log/httpd/error_log
+      RetentionInDays: !Ref RetentionInDays
+  HttpdErrorLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'HttpdErrorLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref HttpdErrorLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  HttpdErrorLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-httpderror
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/httpd/error_log/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-httpderror
+
+  SecureLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: /var/log/secure
+      RetentionInDays: !Ref RetentionInDays
+  SecureLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'SecureLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref SecureLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  SecureLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-secure
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/secure/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-secure
+
+  MessagesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: /var/log/messages
+      RetentionInDays: !Ref RetentionInDays
+  MessagesLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'MessagesLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref MessagesLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  MessagesLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-messages
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/messages/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-messages
+
+  WinSystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: Windows/System
+      RetentionInDays: !Ref RetentionInDays
+  WinSystemLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'WinSystemLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref WinSystemLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  WinSystemLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-winsystem
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/winsystem/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-winsystem
+
+  WinSecurityLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: Windows/Security
+      RetentionInDays: !Ref RetentionInDays
+  WinSecurityLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      DestinationArn: !GetAtt 'WinSecurityLogDeliveryStream.Arn'
+      FilterPattern: ''
+      LogGroupName: !Ref WinSecurityLogGroup
+      RoleArn: !GetAtt 'CWLogsIAMRole.Arn'
+  WinSecurityLogDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamName: iwasa-firehose-deliverystream-winsecurity
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput: 
+        KeyType: "AWS_OWNED_CMK"
+      S3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${CloudWatchLogsS3Bucket}'
+        BufferingHints:
+          SizeInMBs: !Ref SizeInMBs
+          IntervalInSeconds: !Ref IntervalInSeconds
+        CompressionFormat: !Ref CompressionFormat
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        ErrorOutputPrefix: ''
+        Prefix: iwasa/winsecurity/
+        RoleARN: !GetAtt 'FirehoseIAMRole.Arn'
+      Tags:
+        - Key: Name
+          Value: iwasa-firehose-deliverystream-winsecurity
+
+  CloudWatchLogsS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub iwasa-cwlogs-${AWS::AccountId}
+      BucketEncryption: 
+          ServerSideEncryptionConfiguration: 
+            - 
+              ServerSideEncryptionByDefault: 
+                  SSEAlgorithm: "AES256"
+              BucketKeyEnabled: false
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration: 
+          Rules: 
+            - 
+              Id: "auto-delete"
+              Status: "Enabled"
+              ExpirationInDays: 400
+      Tags:
+      - Key: Name
+        Value: !Sub iwasa-cwlogs-${AWS::AccountId}
